@@ -1,0 +1,8 @@
+
+EXPORTS
+	GetClassObject
+	DestroyObject
+	GetAttachType
+	GetClassNames
+	SetPlatformCapabilities
+	GetAttachType

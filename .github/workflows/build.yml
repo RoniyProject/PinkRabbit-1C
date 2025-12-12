@@ -1,0 +1,114 @@
+name: Build
+
+#on:
+#  push:
+#    paths:
+#      - '.github/**'
+#      - 'CI/config.yml'
+#      - 'src/**'
+#      - 'windows/**'
+#      - 'linux/**'
+#      - 'test/**'
+#  workflow_dispatch:
+
+on:
+  workflow_call:
+    inputs:
+      postfix:
+        required: true
+        type: string
+
+env:
+  VERSION: 2.2.0.${{github.run_number}}
+  LINUX_DIR: linux/build
+  LINUX_LIB: libPinkRabbitMQ64.so
+  PKG_DIR: package
+  WIN_DIR: windows
+
+jobs:
+  buildLinux:
+    runs-on: ubuntu-22.04
+    name: Linux ${{inputs.postfix}}
+    services:
+      rabbitmq:
+        image: rabbitmq
+        ports:
+          - 5672:5672
+
+    steps:
+      - uses: actions/checkout@v4.1.5
+
+      - run: mkdir $LINUX_DIR
+
+      - name: Configure CMake.
+        working-directory: ${{env.LINUX_DIR}}
+        run: cmake -DCMAKE_BUILD_TYPE=Release -DVERSION=${{env.VERSION}} -DNAME_POSTFIX=${{inputs.postfix}} ..
+
+      - name: Build
+        working-directory: ${{env.LINUX_DIR}}
+        run: cmake --build .
+
+      - if: ${{ inputs.postfix == '' }}
+        run: python3 -m pip install pytest
+
+      - name: Test
+        if: ${{ inputs.postfix == '' }}
+        working-directory: ${{env.LINUX_DIR}}
+        run: ctest . -V
+
+      - name: Upload Linux Library
+        uses: actions/upload-artifact@v4.3.3
+        with:
+          name: ${{env.LINUX_LIB}}_${{inputs.postfix}}
+          path: ${{env.LINUX_DIR}}/${{env.LINUX_LIB}}
+          if-no-files-found: error
+          retention-days: 1
+
+
+  buildWindows:
+    runs-on: windows-latest
+    needs: [buildLinux]
+    name: Windows ${{inputs.postfix}}
+
+    steps:
+      - uses: actions/checkout@v4.1.5
+
+      - name: Download Linux Library
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: ${{env.LINUX_LIB}}_${{inputs.postfix}}
+          path: ${{env.PKG_DIR}}/
+
+      - name: Remove Linux Artifact
+        uses: GeekyEggo/delete-artifact@v5.0.0
+        with:
+          name: ${{env.LINUX_LIB}}_${{inputs.postfix}}
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+    
+      - name: Build
+        working-directory: ${{env.WIN_DIR}}
+        run: msbuild msbuild.xml -t:makeRelease -p:VERSION=${{env.VERSION}} -p:NAME_POSTFIX=${{inputs.postfix}}
+
+      - name: Rename Build
+        run: ren PinkRabbitMQ_v${{env.VERSION}}.zip PinkRabbitMQ${{inputs.postfix}}_v${{env.VERSION}}.zip
+
+      - name: Release
+        id: release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: prmq_${{github.run_number}}
+          allowUpdates: "true"
+          name: ${{ github.ref != 'refs/heads/master' && '[DEV] ' || '' }}PinkRabbitMQ v${{env.VERSION}}
+          prerelease: ${{ github.ref != 'refs/heads/master' }}
+          artifacts: '*.zip'
+          commit: ${{github.ref}}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            [Новое в версии](https://github.com/BITERP/PinkRabbitMQ/blob/master/CHANGELOG.md)
+
+            ${{ github.event.head_commit.message }}
+
+            [Лог сборки](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})
+
