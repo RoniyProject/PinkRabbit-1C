@@ -16,6 +16,11 @@ ConnectionImpl::ConnectionImpl(const AMQP::Address& address) :
 ConnectionImpl::~ConnectionImpl() {
 	closeChannel(trChannel);
 	closeChannel(rcChannel);
+	if (connection && connection->usable()) {
+		// Try to close AMQP connection gracefully before stopping the IO loop
+		connection->close();
+		std::this_thread::sleep_for(std::chrono::milliseconds(200));
+	}
 	handler.stopLoop();
 	thread.join();
 	connection.reset(nullptr);
@@ -61,8 +66,33 @@ void ConnectionImpl::openChannel(std::unique_ptr<AMQP::Channel>& channel) {
 }
 
 void ConnectionImpl::closeChannel(std::unique_ptr<AMQP::Channel>& channel) {
-	if (channel && channel->usable()) {
-		channel->close();
+	if (!channel) {
+		return;
+	}
+	if (channel->usable()) {
+		struct ChannelCloseState
+		{
+			std::mutex mutex;
+			std::condition_variable cv;
+			bool done = false;
+		};
+		auto state = std::make_shared<ChannelCloseState>();
+		channel->close()
+			.onSuccess([state]()
+				{
+					std::unique_lock<std::mutex> lock(state->mutex);
+					state->done = true;
+					state->cv.notify_all();
+				})
+			.onError([state](const char* message)
+				{
+					Biterp::Logging::error("Channel close failed: " + std::string(message));
+					std::unique_lock<std::mutex> lock(state->mutex);
+					state->done = true;
+					state->cv.notify_all();
+				});
+		std::unique_lock<std::mutex> lock(state->mutex);
+		state->cv.wait_until(lock, std::chrono::steady_clock::now() + std::chrono::milliseconds(1500), [&] { return state->done; });
 	}
 	channel.reset(nullptr);
 }
