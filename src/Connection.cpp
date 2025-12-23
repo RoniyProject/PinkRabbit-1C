@@ -16,8 +16,8 @@
 
 
 
-Connection::Connection(const AMQP::Address& address, int timeout): timeout(timeout), broken(false) {
-	pimpl = new ConnectionImpl(address);
+Connection::Connection(const AMQP::Address& address, int timeout, uint16_t heartbeat): timeout(timeout), heartbeat(heartbeat), broken(false) {
+	pimpl = new ConnectionImpl(address, heartbeat);
 }
 
 Connection::~Connection() {

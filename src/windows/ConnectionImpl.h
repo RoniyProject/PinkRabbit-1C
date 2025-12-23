@@ -6,7 +6,7 @@
 
 class ConnectionImpl{
 public:
-	ConnectionImpl(const AMQP::Address& address);
+	ConnectionImpl(const AMQP::Address& address, uint16_t heartbeat);
 	virtual ~ConnectionImpl();
 	void connect();
 	AMQP::Channel* channel();

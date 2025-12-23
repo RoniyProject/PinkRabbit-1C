@@ -4,8 +4,8 @@
 #include <memory>
 #include <mutex>
 
-ConnectionImpl::ConnectionImpl(const AMQP::Address& address) : 
-	handler(address.hostname(), address.port(), address.secure()),
+ConnectionImpl::ConnectionImpl(const AMQP::Address& address, uint16_t heartbeat) : 
+	handler(address.hostname(), address.port(), address.secure(), heartbeat),
 	trChannel(nullptr)
 {
 	connection.reset(new AMQP::Connection(&handler, address.login(), address.vhost()));

@@ -1,7 +1,11 @@
 #include "RabbitMQClient.h"
 #include "Utils.h"
 #include <mutex>
+#include <algorithm>
+#include <cstdlib>
+#include <cmath>
 #include <nlohmann/json.hpp>
+#include "amqpcpp/decimalfield.h"
 #if defined(__linux__)
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -23,9 +27,18 @@ void RabbitMQClient::connectImpl(Biterp::CallContext& ctx) {
 	std::string user = ctx.stringParamUtf8();
 	std::string pwd = ctx.stringParamUtf8();
 	std::string vhost = ctx.stringParamUtf8();
-	ctx.skipParam();
+	int pingRate = ctx.intParam();
+	if (pingRate < 0) {
+		pingRate = 0;
+	}
+	else if (pingRate > 65535) {
+		pingRate = 65535;
+	}
 	bool ssl = ctx.boolParam();
 	int timeout = ctx.intParam();
+	if (timeout < 1) {
+		timeout = 1;
+	}
 
 	if (host.empty()) {
 		throw Biterp::Error("Empty hostname not allowed");
@@ -41,7 +54,7 @@ void RabbitMQClient::connectImpl(Biterp::CallContext& ctx) {
 	AMQP::Address address(host, port, AMQP::Login(user, pwd), vhost, ssl);
 
 	clear();
-	connection.reset(new Connection(address, timeout));
+	connection.reset(new Connection(address, timeout, static_cast<uint16_t>(pingRate)));
 	try {
 		connection->connect();
 	}
@@ -264,6 +277,13 @@ void RabbitMQClient::basicConsumeImpl(Biterp::CallContext& ctx) {
 	bool noconfirm = ctx.boolParam();
 	bool exclusive = ctx.boolParam();
 	int selectSize = ctx.intParam();
+	// Не даем бесконечного prefetch, чтобы не переполнить входной буфер
+	if (selectSize <= 0) {
+		selectSize = 200;
+	}
+	else if (selectSize > 2000) {
+		selectSize = 2000;
+	}
 	std::string propsJson = ctx.stringParamUtf8();
 
 	AMQP::Table args = headersFromJson(propsJson, true);
@@ -374,7 +394,46 @@ void RabbitMQClient::clear() {
 
 void RabbitMQClient::basicCancelImpl(Biterp::CallContext& ctx) {
 	checkConnection();
-	clear();
+	std::string consumerId = ctx.stringParamUtf8(true);
+	std::vector<std::string> toCancel;
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		if (consumerId.empty()) {
+			toCancel = consumers;
+		}
+		else {
+			auto it = std::find(consumers.begin(), consumers.end(), consumerId);
+			if (it != consumers.end()) {
+				toCancel.push_back(consumerId);
+			}
+		}
+	}
+	if (toCancel.empty()) {
+		throw Biterp::Error("Consumer not found");
+	}
+
+	AMQP::Channel* channel = connection->readChannel();
+	for (const auto& tag : toCancel) {
+		channel->cancel(tag)
+			.onSuccess([this]()
+				{
+					connection->loopbreak();
+				})
+			.onError([this, &tag](const char* message)
+				{
+					connection->loopbreak("Cancel failed for " + tag + ": " + message);
+				});
+		connection->loop();
+		std::lock_guard<std::mutex> lock(_mutex);
+		consumers.erase(std::remove(consumers.begin(), consumers.end(), tag), consumers.end());
+	}
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		if (consumers.empty()) {
+			consumerError.clear();
+			cvDataArrived.notify_all();
+		}
+	}
 }
 
 void RabbitMQClient::basicAckImpl(Biterp::CallContext& ctx) {
@@ -420,17 +479,37 @@ AMQP::Table RabbitMQClient::headersFromJson(const std::string& propsJson, bool f
 	for (auto& it : object.items()) {
 		auto& value = it.value();
 		std::string name = it.key();
-		if (value.is_boolean())
+		if (forConsume && name == "x-stream-offset")
+		{
+			if (value.is_string())
+			{
+				headers.set(name, AMQP::Timestamp(Utils::parseDateTime(value.get<std::string>())));
+			}
+			else if (value.is_number_integer() || value.is_number_unsigned())
+			{
+				headers.set(name, value.get<int64_t>());
+			}
+			else
+			{
+				throw Biterp::Error("Unsupported json type for property " + name);
+			}
+		}
+		else if (value.is_boolean())
 		{
 			headers.set(name, value.get<bool>());
 		}
-		else if (value.is_number())
+		else if (value.is_number_integer() || value.is_number_unsigned())
 		{
 			headers.set(name, value.get<int64_t>());
 		}
-		else if (forConsume && name == "x-stream-offset") 
+		else if (value.is_number_float())
 		{
-			headers.set(name, AMQP::Timestamp(Utils::parseDateTime(value)));
+			double dval = value.get<double>();
+			// convert to AMQP decimal with 6 fractional digits
+			int64_t scaled = static_cast<int64_t>(std::llround(dval * 1'000'000.0));
+			uint32_t absScaled = static_cast<uint32_t>(std::llabs(scaled));
+			uint8_t places = 6;
+			headers.set(name, AMQP::DecimalField(places, absScaled));
 		}
 		else if (value.is_string())
 		{

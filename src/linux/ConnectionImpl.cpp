@@ -6,7 +6,7 @@
 #include <chrono>
 #include <thread>
 
-ConnectionImpl::ConnectionImpl(const AMQP::Address& address) : 
+ConnectionImpl::ConnectionImpl(const AMQP::Address& address, uint16_t /*heartbeat*/) : 
     trChannel(nullptr), stop(false)
 {
     static bool sslInited = false;

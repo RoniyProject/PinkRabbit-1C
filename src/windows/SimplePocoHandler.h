@@ -11,10 +11,10 @@ class SimplePocoHandler: public AMQP::ConnectionHandler
 {
 public:
 
-    static constexpr size_t BUFFER_SIZE = 8 * 1024 * 1024; //8Mb
-    static constexpr size_t TEMP_BUFFER_SIZE = 1 * 1024 * 1024; //1Mb
+    static constexpr size_t BUFFER_SIZE = 32 * 1024 * 1024; //32Mb
+    static constexpr size_t TEMP_BUFFER_SIZE = 2 * 1024 * 1024; //2Mb
 
-    SimplePocoHandler(const std::string& host, uint16_t port, bool ssl);
+    SimplePocoHandler(const std::string& host, uint16_t port, bool ssl, uint16_t heartbeat);
     virtual ~SimplePocoHandler();
 
     void setConnection(AMQP::Connection* connection);
@@ -46,6 +46,7 @@ private:
     std::shared_ptr<SimplePocoHandlerImpl> m_impl;
     std::string error;
     std::atomic<bool> stop;
+    uint16_t desiredHeartbeat;
 
 };
 

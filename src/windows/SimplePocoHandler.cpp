@@ -5,10 +5,10 @@
 #include <cassert>
 #include <iostream>
 #include <mutex>
+#include <atomic>
 #include <Poco/Net/StreamSocket.h>
 #include <Poco/Net/SecureStreamSocket.h>
 #include <Poco/Net/RejectCertificateHandler.h>
-#include <Poco/Net/AcceptCertificateHandler.h>
 #include <Poco/Net/SSLManager.h>
 #include <Poco/Net/NetException.h>
 #include <Poco/Exception.h>
@@ -19,6 +19,22 @@ using namespace Poco::Net;
 
 namespace
 {
+	std::once_flag sslInitFlag;
+	std::atomic<uint32_t> sslUsers{0};
+
+	void ensureSSLInitialized()
+	{
+		std::call_once(sslInitFlag, []() { Poco::Net::initializeSSL(); });
+	}
+
+	void releaseSSLOneRef()
+	{
+		if (sslUsers.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		{
+			Poco::Net::uninitializeSSL();
+		}
+	}
+
 	class Buffer
 	{
 	public:
@@ -86,14 +102,17 @@ struct SimplePocoHandlerImpl
 		inputBuffer(SimplePocoHandler::BUFFER_SIZE),
 		outBuffer(SimplePocoHandler::BUFFER_SIZE),
 		tmpBuff(SimplePocoHandler::TEMP_BUFFER_SIZE),
-		pollTimeout(0, 10000) // 10 ms poll to avoid spinning when idle
+		pollTimeout(0, 10000), // 10 ms poll to avoid spinning when idle
+		overflowBytes(0),
+		overflowLastLog(),
+		useSSL(ssl)
 	{
-		initializeSSL();
 		if (ssl) 
 		{
-			// Replace with AcceptCertificateHandler to skip cert verification 
-			Poco::SharedPtr<InvalidCertificateHandler> pInvHandler = new AcceptCertificateHandler(false);
-			Context::Ptr pContext = new Poco::Net::Context(Context::TLS_CLIENT_USE, "");
+			ensureSSLInitialized();
+			sslUsers.fetch_add(1, std::memory_order_relaxed);
+			Poco::SharedPtr<InvalidCertificateHandler> pInvHandler = new RejectCertificateHandler(false);
+			Context::Ptr pContext = new Poco::Net::Context(Context::TLS_CLIENT_USE, "", "", "", Context::VERIFY_STRICT);
 			SSLManager::instance().initializeClient(nullptr, pInvHandler, pContext);
 			SecureStreamSocket* sslSocket = new SecureStreamSocket();
 			sslSocket->setPeerHostName(host);
@@ -107,7 +126,10 @@ struct SimplePocoHandlerImpl
 	}
 
 	~SimplePocoHandlerImpl() {
-		uninitializeSSL();
+		if (useSSL)
+		{
+			releaseSSLOneRef();
+		}
 	}
 
 	std::unique_ptr<Poco::Net::StreamSocket> socket;
@@ -117,9 +139,12 @@ struct SimplePocoHandlerImpl
 	std::vector<char> tmpBuff;
 	Poco::Timespan pollTimeout;
 	std::mutex outMutex;
+	size_t overflowBytes;
+	std::chrono::steady_clock::time_point overflowLastLog;
+	bool useSSL;
 };
-SimplePocoHandler::SimplePocoHandler(const std::string& host, uint16_t port, bool ssl) :
-	m_impl(new SimplePocoHandlerImpl(ssl, host)), stop(false)
+SimplePocoHandler::SimplePocoHandler(const std::string& host, uint16_t port, bool ssl, uint16_t heartbeat) :
+	m_impl(new SimplePocoHandlerImpl(ssl, host)), stop(false), desiredHeartbeat(heartbeat)
 {
 	const Poco::Net::SocketAddress address(host, port);
 	m_impl->socket->connect(address);
@@ -214,7 +239,22 @@ void SimplePocoHandler::loopIteration() {
 			const size_t pushed = m_impl->inputBuffer.write(m_impl->tmpBuff.data(), static_cast<size_t>(received));
 			if (pushed < static_cast<size_t>(received))
 			{
-				Biterp::Logging::error("Input buffer overflow, dropping data");
+				// throttle logging to avoid gigabyte log files
+				m_impl->overflowBytes += static_cast<size_t>(received) - pushed;
+				auto now = std::chrono::steady_clock::now();
+				if (m_impl->overflowLastLog.time_since_epoch().count() == 0 ||
+					std::chrono::duration_cast<std::chrono::seconds>(now - m_impl->overflowLastLog).count() >= 1) {
+					Biterp::Logging::error("Input buffer overflow, dropped " + std::to_string(m_impl->overflowBytes) + " bytes");
+					m_impl->overflowBytes = 0;
+					m_impl->overflowLastLog = now;
+				}
+				if (m_impl->connection)
+				{
+					m_impl->connection->close();
+				}
+				stop.store(true, std::memory_order_relaxed);
+				socketClosed = true;
+				break;
 			}
 
 			if (m_impl->socket->available() <= 0)
@@ -304,6 +344,10 @@ void SimplePocoHandler::onClosed(AMQP::Connection* connection)
 }
 
 uint16_t SimplePocoHandler::onNegotiate(AMQP::Connection* connection, uint16_t interval) {
+	if (desiredHeartbeat > 0)
+	{
+		return desiredHeartbeat;
+	}
 	return interval;
 }
 

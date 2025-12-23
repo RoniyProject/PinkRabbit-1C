@@ -9,7 +9,7 @@ class ConnectionImpl;
 
 class Connection {
 public:
-	Connection(const AMQP::Address& address, int timeout);
+	Connection(const AMQP::Address& address, int timeout, uint16_t heartbeat = 0);
 	virtual ~Connection();
 	void connect();
 	AMQP::Channel* channel();
@@ -20,6 +20,7 @@ public:
 private:
 	ConnectionImpl* pimpl;
 	int timeout;
+	uint16_t heartbeat;
 	volatile bool broken;
 	std::string error;
 	std::mutex _mutex;

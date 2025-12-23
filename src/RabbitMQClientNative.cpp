@@ -273,6 +273,12 @@ bool RabbitMQClientNative::GetParamDefValue(const long lMethodNum, const long lP
 	case eMethBasicPublish:
 	case eMethDeclareExchange:
 	case eMethBasicConsume:
+		if (lParamNum == 4) {
+			// Ограничиваем prefetch по умолчанию, чтобы не захламлять входной буфер
+			TV_VT(pvarParamDefValue) = VTYPE_I4;
+			TV_I4(pvarParamDefValue) = 200;
+			return true;
+		}
 		if (lParamNum == 5) {
 			TV_VT(pvarParamDefValue) = VTYPE_PWSTR;
 			TV_WSTR(pvarParamDefValue) = nullptr;
