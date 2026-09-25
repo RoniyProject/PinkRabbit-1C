@@ -70,6 +70,8 @@ jobs:
   buildWindows:
     runs-on: windows-latest
     needs: [buildLinux]
+    permissions:
+      contents: write
     name: Windows ${{inputs.postfix}}
 
     steps:

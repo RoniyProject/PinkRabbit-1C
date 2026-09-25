@@ -13,6 +13,9 @@ on:
 
 jobs:
   versions:
+    # the called workflow publishes a GitHub release: the token needs write access to the repository contents
+    permissions:
+      contents: write
     strategy:
       matrix:
         name: ["","_2","_3","_4","_5","_6","_7","_8","_9",
