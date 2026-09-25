@@ -55,8 +55,14 @@ jobs:
         if: ${{ inputs.postfix == '' }}
         # a test failure is shown in the run, but does not cancel the builds and the release
         continue-on-error: true
+        timeout-minutes: 15
         working-directory: ${{env.LINUX_DIR}}
-        run: ctest . -V
+        run: python3 -m pytest ../../test -v -rfE -p no:cacheprovider --junitxml=pytest-report.xml
+
+      - name: Test report
+        if: ${{ always() && inputs.postfix == '' }}
+        working-directory: ${{env.LINUX_DIR}}
+        run: python3 ../../.github/scripts/pytest_report.py pytest-report.xml
 
       - name: Upload Linux Library
         uses: actions/upload-artifact@v4.3.3
