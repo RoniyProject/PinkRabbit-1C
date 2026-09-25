@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <atomic>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include "amqpcpp/decimalfield.h"
 #if defined(__linux__)
@@ -287,14 +289,16 @@ void RabbitMQClient::basicConsumeImpl(Biterp::CallContext& ctx) {
 	std::string propsJson = ctx.stringParamUtf8();
 
 	AMQP::Table args = headersFromJson(propsJson, true);
-	std::string result;
+	auto consumeTag = std::make_shared<std::string>();
+	auto subscribePending = std::make_shared<std::atomic_bool>(true);
 	{
 		AMQP::Channel* channel = connection->readChannel();
 		channel->setQos(selectSize);
 		channel->consume(queue, consumerId, (noconfirm ? AMQP::noack : 0) | (exclusive ? AMQP::exclusive : 0), args)
-			.onSuccess([this, &result](const std::string& tag)
+			.onSuccess([this, consumeTag, subscribePending](const std::string& tag)
 				{
-					result = tag;
+					*consumeTag = tag;
+					subscribePending->store(false, std::memory_order_release);
 					LOGI("Consumer created " + tag);
 					{
 						std::lock_guard<std::mutex> lock(_mutex);
@@ -333,19 +337,24 @@ void RabbitMQClient::basicConsumeImpl(Biterp::CallContext& ctx) {
 					LOGI("Consumer cancelled " + consumer);
 					std::lock_guard<std::mutex> lock(_mutex);
 					consumers.erase(std::remove_if(consumers.begin(), consumers.end(), [&consumer](std::string& s){return s == consumer;}));
+					cvDataArrived.notify_all();
 				})
-			.onError([this, &result](const char* message)
+			.onError([this, subscribePending](const char* message)
 				{
-					std::lock_guard<std::mutex> lock(_mutex);
-					consumerError = message;
-					LOGE("Consumer error: " + consumerError);
-					if (result.empty()){
-						connection->loopbreak(consumerError);
+					const std::string errorText = message ? message : "Unknown consumer error";
+					{
+						std::lock_guard<std::mutex> lock(_mutex);
+						consumerError = errorText;
+					}
+					cvDataArrived.notify_all();
+					LOGE("Consumer error: " + errorText);
+					if (subscribePending->exchange(false, std::memory_order_acq_rel)) {
+						connection->loopbreak(errorText);
 					}
 				});
 	}
 	connection->loop();
-	ctx.setStringResult(u16Converter.from_bytes(result));
+	ctx.setStringResult(u16Converter.from_bytes(*consumeTag));
 }
 
 
@@ -360,6 +369,9 @@ void RabbitMQClient::basicConsumeMessageImpl(Biterp::CallContext& ctx) {
 	tVariant* outdata = ctx.skipParam();
 	tVariant* outMessageTag = ctx.skipParam();
 	int timeout = ctx.intParam();
+	if (timeout < 0) {
+		timeout = 0;
+	}
 	ctx.setEmptyResult(outdata);
 	ctx.setIntResult(0, outMessageTag);
 	{
@@ -368,9 +380,12 @@ void RabbitMQClient::basicConsumeMessageImpl(Biterp::CallContext& ctx) {
 			if (!consumerError.empty()){
 				throw Biterp::Error(consumerError);
 			}
-			if (!cvDataArrived.wait_for(lock, std::chrono::milliseconds(timeout), [&] { return !messageQueue.empty(); })) {
+			if (!cvDataArrived.wait_for(lock, std::chrono::milliseconds(timeout), [&] { return !messageQueue.empty() || !consumerError.empty(); })) {
 				ctx.setBoolResult(false);
 				return;
+			}
+			if (!consumerError.empty()) {
+				throw Biterp::Error(consumerError);
 			}
 			if (messageQueue.empty()) {
 				throw Biterp::Error("Empty consume message");
@@ -413,22 +428,40 @@ void RabbitMQClient::basicCancelImpl(Biterp::CallContext& ctx) {
 	}
 
 	AMQP::Channel* channel = connection->readChannel();
+	bool timedOut = false;
 	for (const auto& tag : toCancel) {
 		channel->cancel(tag)
 			.onSuccess([this]()
 				{
 					connection->loopbreak();
 				})
-			.onError([this, &tag](const char* message)
+			.onError([this, tag](const char* message)
 				{
-					connection->loopbreak("Cancel failed for " + tag + ": " + message);
+					const std::string msg = message ? message : "Unknown cancel error";
+					connection->loopbreak("Cancel failed for " + tag + ": " + msg);
 				});
-		connection->loop();
+		try {
+			connection->loop();
+		}
+		catch (std::exception& ex) {
+			if (std::string(ex.what()) != "AMQP server timeout error") {
+				throw;
+			}
+			LOGE("Cancel timeout for consumer " + tag + ". Force close read channel.");
+			timedOut = true;
+			break;
+		}
 		std::lock_guard<std::mutex> lock(_mutex);
 		consumers.erase(std::remove(consumers.begin(), consumers.end(), tag), consumers.end());
 	}
+	if (timedOut && channel->usable()) {
+		channel->close();
+	}
 	{
 		std::lock_guard<std::mutex> lock(_mutex);
+		if (timedOut) {
+			consumers.clear();
+		}
 		if (consumers.empty()) {
 			consumerError.clear();
 			cvDataArrived.notify_all();
