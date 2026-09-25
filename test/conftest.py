@@ -12,6 +12,10 @@ if HERE not in sys.path:
 # certificate check, Windows process counters). The Linux transport differs, see README.
 WINDOWS_ONLY_MODULES = {"test_stability.py", "test_tls.py", "test_review_fixes.py"}
 
+# not even imported on other systems: an import error there would stop the whole collection
+if sys.platform != "win32":
+    collect_ignore = sorted(WINDOWS_ONLY_MODULES)
+
 
 def pytest_collection_modifyitems(config, items):
     if sys.platform == "win32":

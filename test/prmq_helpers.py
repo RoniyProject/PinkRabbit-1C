@@ -344,7 +344,10 @@ if os.name == "nt":
         finally:
             _k32.CloseHandle(snap)
 else:
-    import psutil  # noqa: E402
+    try:
+        import psutil  # noqa: E402
+    except ImportError:  # optional outside Windows: only the resource checks need it
+        psutil = None
 
     def private_bytes():
         mi = psutil.Process().memory_full_info()
