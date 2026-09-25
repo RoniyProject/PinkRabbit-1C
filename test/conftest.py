@@ -8,6 +8,20 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 
+# Scenarios written for the Windows transport (WSAPoll loop, client heartbeat timeout, Poco TLS with
+# certificate check, Windows process counters). The Linux transport differs, see README.
+WINDOWS_ONLY_MODULES = {"test_stability.py", "test_tls.py", "test_review_fixes.py"}
+
+
+def pytest_collection_modifyitems(config, items):
+    if sys.platform == "win32":
+        return
+    skip = pytest.mark.skip(reason="mock broker scenarios target the Windows transport")
+    for item in items:
+        if os.path.basename(str(item.fspath)) in WINDOWS_ONLY_MODULES:
+            item.add_marker(skip)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
