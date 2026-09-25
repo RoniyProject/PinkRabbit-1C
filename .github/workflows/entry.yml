@@ -13,9 +13,8 @@ on:
 
 jobs:
   versions:
-    # the called workflow publishes a GitHub release: the token needs write access to the repository contents
     permissions:
-      contents: write
+      contents: read
     strategy:
       matrix:
         name: ["","_2","_3","_4","_5","_6","_7","_8","_9",
@@ -26,3 +25,35 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       postfix: ${{ matrix.name }}
+
+  # One release per run, created after all builds: parallel jobs creating the same tag
+  # failed with 422 already_exists
+  release:
+    needs: [versions]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Packages
+        uses: actions/download-artifact@v4.1.7
+        with:
+          pattern: prmq-package*
+          merge-multiple: true
+          path: packages
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: prmq_${{github.run_number}}
+          # keep the version in sync with VERSION in build.yml
+          name: ${{ github.ref != 'refs/heads/main' && '[DEV] ' || '' }}PinkRabbitMQ v2.3.0.${{github.run_number}}
+          prerelease: ${{ github.ref != 'refs/heads/main' }}
+          artifacts: 'packages/*.zip'
+          commit: ${{github.sha}}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            [Новое в версии](https://github.com/${{github.repository}}/blob/main/CHANGELOG.md)
+
+            ${{ github.event.head_commit.message }}
+
+            [Лог сборки](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})

@@ -19,6 +19,7 @@ on:
         type: string
 
 env:
+  # keep in sync with the release name in entry.yml
   VERSION: 2.3.0.${{github.run_number}}
   LINUX_DIR: linux/build
   LINUX_LIB: libPinkRabbitMQ64.so
@@ -76,8 +77,6 @@ jobs:
   buildWindows:
     runs-on: windows-latest
     needs: [buildLinux]
-    permissions:
-      contents: write
     name: Windows ${{inputs.postfix}}
 
     steps:
@@ -104,21 +103,12 @@ jobs:
       - name: Rename Build
         run: ren PinkRabbitMQ_v${{env.VERSION}}.zip PinkRabbitMQ${{inputs.postfix}}_v${{env.VERSION}}.zip
 
-      - name: Release
-        id: release
-        uses: ncipollo/release-action@v1
+      # the release is created once by the release job of entry.yml after all builds
+      - name: Upload Package
+        uses: actions/upload-artifact@v4.3.3
         with:
-          tag: prmq_${{github.run_number}}
-          allowUpdates: "true"
-          name: ${{ github.ref != 'refs/heads/main' && '[DEV] ' || '' }}PinkRabbitMQ v${{env.VERSION}}
-          prerelease: ${{ github.ref != 'refs/heads/main' }}
-          artifacts: '*.zip'
-          commit: ${{github.ref}}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          body: |
-            [Новое в версии](https://github.com/${{github.repository}}/blob/main/CHANGELOG.md)
-
-            ${{ github.event.head_commit.message }}
-
-            [Лог сборки](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})
+          name: prmq-package${{inputs.postfix}}
+          path: PinkRabbitMQ${{inputs.postfix}}_v${{env.VERSION}}.zip
+          if-no-files-found: error
+          retention-days: 1
 
