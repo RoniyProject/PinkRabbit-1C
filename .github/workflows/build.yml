@@ -104,13 +104,13 @@ jobs:
         with:
           tag: prmq_${{github.run_number}}
           allowUpdates: "true"
-          name: ${{ github.ref != 'refs/heads/master' && '[DEV] ' || '' }}PinkRabbitMQ v${{env.VERSION}}
-          prerelease: ${{ github.ref != 'refs/heads/master' }}
+          name: ${{ github.ref != 'refs/heads/main' && '[DEV] ' || '' }}PinkRabbitMQ v${{env.VERSION}}
+          prerelease: ${{ github.ref != 'refs/heads/main' }}
           artifacts: '*.zip'
           commit: ${{github.ref}}
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            [Новое в версии](https://github.com/BITERP/PinkRabbitMQ/blob/master/CHANGELOG.md)
+            [Новое в версии](https://github.com/${{github.repository}}/blob/main/CHANGELOG.md)
 
             ${{ github.event.head_commit.message }}
 
