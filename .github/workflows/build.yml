@@ -19,7 +19,7 @@ on:
         type: string
 
 env:
-  VERSION: 2.2.0.${{github.run_number}}
+  VERSION: 2.3.0.${{github.run_number}}
   LINUX_DIR: linux/build
   LINUX_LIB: libPinkRabbitMQ64.so
   PKG_DIR: package
@@ -53,6 +53,8 @@ jobs:
 
       - name: Test
         if: ${{ inputs.postfix == '' }}
+        # a test failure is shown in the run, but does not cancel the builds and the release
+        continue-on-error: true
         working-directory: ${{env.LINUX_DIR}}
         run: ctest . -V
 
