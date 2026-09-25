@@ -72,7 +72,8 @@ namespace Biterp {
                 std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> conv;
                 errors.push_back(conv.to_bytes((char16_t *) descr));
                 if (raiseErrors) {
-                    throw TestError(conv.to_bytes((char16_t *) descr));
+                    // the platform raises the 1C exception after the method returns
+                    pendingError = conv.to_bytes((char16_t *) descr);
                 }
                 return true;
             }
@@ -165,7 +166,8 @@ namespace Biterp {
                 memManager.FreeMemory((void **) &wnameBuf);
 
                 ASSERT_EQ(name, wname);
-                ASSERT_EQ(argsCnt, addin->GetNParams(ret));
+                // like the platform: trailing parameters may be omitted, their defaults are used
+                ASSERT(argsCnt <= addin->GetNParams(ret));
                 ASSERT_EQ(isFunc, addin->HasRetVal(ret));
                 return ret;
             }
@@ -189,28 +191,70 @@ namespace Biterp {
             }
 
 
+            // Fill omitted trailing parameters with GetParamDefValue, as the platform does
+            bool callWithDefaults(long meth, tVariant *ret, tVariant *params, long pCnt, bool isFunc) {
+                const long total = addin->GetNParams(meth);
+                std::vector<tVariant> full(total > 0 ? total : 1);
+                for (long i = 0; i < pCnt; i++) {
+                    full[i] = params[i];
+                }
+                for (long i = pCnt; i < total; i++) {
+                    tVarInit(&full[i]);
+                    if (!addin->GetParamDefValue(meth, i, &full[i])) {
+                        throw TestError("Parameter has no default value: ") << i;
+                    }
+                }
+                pendingError.clear();
+                bool result = isFunc ? addin->CallAsFunc(meth, ret, full.data(), total)
+                                     : addin->CallAsProc(meth, full.data(), total);
+                for (long i = 0; i < pCnt; i++) {
+                    params[i] = full[i];
+                }
+                for (long i = pCnt; i < total; i++) {
+                    if (full[i].vt == VTYPE_PWSTR && full[i].pwstrVal) {
+                        memManager.FreeMemory((void **) &full[i].pwstrVal);
+                    }
+                }
+                raisePending();
+                return result;
+            }
+
+            void raisePending() {
+                if (!pendingError.empty()) {
+                    std::string error;
+                    error.swap(pendingError);
+                    throw TestError(error);
+                }
+            }
+
             bool callAsProc(std::u16string name, tVariant *params, long pCnt) {
                 long meth = methodNum(name, pCnt, false);
                 ASSERT(meth >= 0);
-                return addin->CallAsProc(meth, params, pCnt);
+                return callWithDefaults(meth, nullptr, params, pCnt, false);
             }
 
             bool callAsFunc(std::u16string name, tVariant *ret, tVariant *params, long pCnt) {
                 long meth = methodNum(name, pCnt, true);
                 ASSERT(meth >= 0);
-                return addin->CallAsFunc(meth, ret, params, pCnt);
+                return callWithDefaults(meth, ret, params, pCnt, true);
             }
 
             bool getPropVal(std::u16string name, tVariant *ret) {
                 long pNum = propNum(name);
                 ASSERT(pNum >= 0);
-                return addin->GetPropVal(pNum, ret);
+                pendingError.clear();
+                bool result = addin->GetPropVal(pNum, ret);
+                raisePending();
+                return result;
             }
 
             bool setPropVal(std::u16string name, tVariant* val) {
                 long pNum = propNum(name);
                 ASSERT(pNum >= 0);
-                return addin->SetPropVal(pNum, val);
+                pendingError.clear();
+                bool result = addin->SetPropVal(pNum, val);
+                raisePending();
+                return result;
             }
 
             //-- params filling
@@ -308,6 +352,7 @@ namespace Biterp {
             MemManager memManager;
             bool raiseErrors;
             vector<string> errors;
+            string pendingError;
             vector<string> events;
         };
 
