@@ -49,6 +49,9 @@ public:
 		eMethGetRoutingKey,
 		eMethGetHeaders,
 		eMethSleepNative,
+		eMethWaitForConfirms,
+		eMethSetLogLevel,
+		eMethIsConnected,
 		eMethLast      // Always last
 	};
 

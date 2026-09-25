@@ -4,31 +4,30 @@
 #include <addin/biterp/Component.hpp>
 #include <map>
 #include <vector>
-#include <queue>
+#include <deque>
+#include <unordered_set>
 #include <mutex>
 #include <condition_variable>
+#include <memory>
 
 
-class RabbitMQClient : public Biterp::Component {
+class RabbitMQClient : public Biterp::Component, private ConnectionListener {
 public:
 	// Transiting properties
-	const int CORRELATION_ID = 1;
-	const int TYPE_NAME = 2;
-	const int MESSAGE_ID = 3;
-	const int APP_ID = 4;
-	const int CONTENT_ENCODING = 5;
-	const int CONTENT_TYPE = 6;
-	const int USER_ID = 7;
-	const int CLUSTER_ID = 8;
-	const int EXPIRATION = 9;
-	const int REPLY_TO = 10;
+	static constexpr int CORRELATION_ID = 1;
+	static constexpr int TYPE_NAME = 2;
+	static constexpr int MESSAGE_ID = 3;
+	static constexpr int APP_ID = 4;
+	static constexpr int CONTENT_ENCODING = 5;
+	static constexpr int CONTENT_TYPE = 6;
+	static constexpr int USER_ID = 7;
+	static constexpr int CLUSTER_ID = 8;
+	static constexpr int EXPIRATION = 9;
+	static constexpr int REPLY_TO = 10;
 public:
 	RabbitMQClient() : Biterp::Component("RabbitMQClient"), priority(0) {};
 
-	virtual ~RabbitMQClient() { 
-		clear(); 
-		connection.reset(nullptr);
-	};
+	virtual ~RabbitMQClient();
 
 	inline bool connect(tVariant* paParams, const long lSizeArray) {
 		return wrapCall(this, &RabbitMQClient::connectImpl, paParams, lSizeArray);
@@ -63,6 +62,9 @@ public:
 	inline bool setPriority(tVariant* paParams, const long lSizeArray) {
 		return wrapCall(this, &RabbitMQClient::setPriorityImpl, paParams, lSizeArray);
 	}
+	inline bool setLogLevel(tVariant* paParams, const long lSizeArray) {
+		return wrapCall(this, &RabbitMQClient::setLogLevelImpl, paParams, lSizeArray);
+	}
 
 	inline bool basicConsume(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray) {
 		return wrapCall(this, &RabbitMQClient::basicConsumeImpl, paParams, lSizeArray, pvarRetValue);
@@ -81,6 +83,12 @@ public:
 	}
 	inline bool getHeaders(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray) {
 		return wrapCall(this, &RabbitMQClient::getHeadersImpl, paParams, lSizeArray, pvarRetValue);
+	}
+	inline bool waitForConfirms(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray) {
+		return wrapCall(this, &RabbitMQClient::waitForConfirmsImpl, paParams, lSizeArray, pvarRetValue);
+	}
+	inline bool isConnected(tVariant* pvarRetValue, tVariant* paParams, const long lSizeArray) {
+		return wrapCall(this, &RabbitMQClient::isConnectedImpl, paParams, lSizeArray, pvarRetValue);
 	}
 
 	inline bool getMsgProp(tVariant* pvarPropVal, const long lPropNum) {
@@ -107,6 +115,7 @@ private:
 	void unbindQueueImpl(Biterp::CallContext& ctx);
 
 	void basicPublishImpl(Biterp::CallContext& ctx);
+	void waitForConfirmsImpl(Biterp::CallContext& ctx);
 
 	void basicConsumeImpl(Biterp::CallContext& ctx);
 	void basicConsumeMessageImpl(Biterp::CallContext& ctx);
@@ -115,41 +124,76 @@ private:
 	void basicRejectImpl(Biterp::CallContext& ctx);
 
 	void sleepNativeImpl(Biterp::CallContext& ctx);
-	
-	inline void getRoutingKeyImpl(Biterp::CallContext& ctx) { ctx.setStringResult(u16Converter.from_bytes(lastMessage.routingKey)); }
-	inline void getHeadersImpl(Biterp::CallContext& ctx) { ctx.setStringResult(u16Converter.from_bytes(lastMessageHeaders())); }
-	inline void setPriorityImpl(Biterp::CallContext& ctx) { priority = ctx.intParam(); }
-	inline void getPriorityImpl(Biterp::CallContext& ctx) { ctx.setIntResult(lastMessage.priority); }
+	void setLogLevelImpl(Biterp::CallContext& ctx);
+	void isConnectedImpl(Biterp::CallContext& ctx);
 
-	inline void getMsgPropImpl(const long propNum, Biterp::CallContext& ctx) { ctx.setStringResult(u16Converter.from_bytes(lastMessage.msgProps[propNum])); }
-	inline void setMsgPropImpl(const long propNum, Biterp::CallContext& ctx) { msgProps[propNum] = ctx.stringParamUtf8(); }
+	void getRoutingKeyImpl(Biterp::CallContext& ctx);
+	void getHeadersImpl(Biterp::CallContext& ctx);
+	void setPriorityImpl(Biterp::CallContext& ctx);
+	void getPriorityImpl(Biterp::CallContext& ctx);
+
+	void getMsgPropImpl(const long propNum, Biterp::CallContext& ctx);
+	void setMsgPropImpl(const long propNum, Biterp::CallContext& ctx);
 
 	AMQP::Table headersFromJson(const std::string& json, bool forConsume=false);
 	void checkConnection();
 	std::string lastMessageHeaders();
+	void settle(uint64_t tag, bool multiple, bool ack, bool requeue);
+	void setTagResult(Biterp::CallContext& ctx, uint64_t tag, tVariant* param);
+	void resetConsumerState();
 
-	void clear();
+	// ConnectionListener, IO thread
+	void onConsumeChannelOpened(uint32_t channelId) override;
+	void onConsumeChannelClosed(uint32_t channelId, const std::string& reason) override;
+	void onConnectionLost(const std::string& reason) override;
+
+	// Consumer callbacks, IO thread
+	void onConsumerStarted(uint32_t channelId, const std::string& tag);
+	void onConsumerCancelled(uint32_t channelId, const std::string& tag);
+	// false if the consumer is unknown (the message must be returned to the broker)
+	bool onDelivery(uint32_t channelId, const std::string& consumerTag, const AMQP::Message& message,
+		uint64_t deliveryTag, bool autoAck);
 
 private:
 	struct MessageObject {
 		std::string body;
-		uint64_t messageTag = 0;
+		uint64_t messageTag = 0;   // tag given to 1C, unique for the component object
+		uint64_t deliveryTag = 0;  // AMQP delivery tag on its channel
+		uint32_t channelId = 0;
+		std::string consumerTag;
+		bool autoAck = false;
 		int priority = 0;
 		std::string routingKey;
 		std::map<int, std::string> msgProps;
 		AMQP::Table headers;
 	};
 
+	struct IssuedTag {
+		uint32_t channelId = 0;
+		uint64_t deliveryTag = 0;
+	};
+
 private:
+	// publication properties, 1C thread
 	std::map<int, std::string> msgProps;
-	std::unique_ptr<Connection> connection;
 	int priority;
 	MessageObject lastMessage;
-	std::string consumerError;
-	std::vector<std::string> consumers;
-	std::queue<MessageObject> messageQueue;
+
+	std::unique_ptr<Connection> connection;
+
+	// consumer state, guarded by _mutex
 	std::mutex _mutex;
 	std::condition_variable cvDataArrived;
+	std::string consumerError;
+	std::vector<std::string> consumers;
+	std::deque<MessageObject> messageQueue;
+	uint32_t consumeChannelId = 0;
+	uint64_t tagBase = 0;          // messageTag = tagBase + deliveryTag on the current channel
+	uint64_t lastAssignedTag = 0;  // the biggest messageTag given out so far
+	uint64_t staleUpTo = 0;        // tags up to this value belong to closed channels
+	std::map<uint64_t, IssuedTag> issuedTags;       // given to 1C, waiting for BasicAck/BasicReject
+	std::unordered_set<uint64_t> autoAcked;         // noConfirm consumers: already acknowledged
+	std::deque<uint64_t> autoAckedOrder;
 
 private:
 
@@ -165,13 +209,12 @@ private:
 			result = true;
 		}
 		catch (std::exception& e) {
-			std::string who = typeid(e).name();
-			std::string what = e.what();
-			LOGE(who + ": " + what);
-			addError(what, who);
+			reportException(typeid(e).name(), e.what());
+		}
+		catch (...) {
+			reportException("unknown", "Unknown native exception");
 		}
 		return result;
 	}
 
 };
-

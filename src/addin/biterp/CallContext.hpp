@@ -6,11 +6,10 @@
 #define ANDROID_CALLCONTEXT_HPP
 
 #include <string>
-#include <codecvt>
-#include <locale>
 #include "../types.h"
 #include "MemoryManager.hpp"
 #include "Error.hpp"
+#include "Utf.hpp"
 
 namespace Biterp {
 
@@ -65,33 +64,50 @@ namespace Biterp {
 
         std::string stringParamUtf8(bool nullable = true) {
             std::u16string value = stringParam(nullable);
-            return u16Converter.to_bytes(value);
+            return Utf::toUtf8(value);
         }
 
         double doubleParam() {
             tVariant *param = currentParam();
-            if (param->vt == VTYPE_R4 || param->vt == VTYPE_R8) {
+            if (param->vt == VTYPE_R4) {
+                index++;
+                return param->fltVal;
+            }
+            if (param->vt == VTYPE_R8) {
                 index++;
                 return param->dblVal;
             }
             throw TypeError(index, "number", param->vt);
         }
 
+        // each integer type is read from its own member of the variant union
         int64_t longParam() {
             tVariant *param = currentParam();
             switch (param->vt) {
-                case VTYPE_UI1:
                 case VTYPE_I1:
-                case VTYPE_UI2:
+                    index++;
+                    return param->i8Val;
+                case VTYPE_UI1:
+                    index++;
+                    return param->ui8Val;
                 case VTYPE_I2:
-                case VTYPE_UI4:
+                    index++;
+                    return param->shortVal;
+                case VTYPE_UI2:
+                    index++;
+                    return param->ushortVal;
                 case VTYPE_I4:
                     index++;
                     return param->lVal;
-                case VTYPE_UI8:
+                case VTYPE_UI4:
+                    index++;
+                    return param->ulVal;
                 case VTYPE_I8:
                     index++;
                     return param->llVal;
+                case VTYPE_UI8:
+                    index++;
+                    return static_cast<int64_t>(param->ullVal);
                 default:
                     return static_cast<int64_t>(doubleParam());
             }
@@ -99,6 +115,37 @@ namespace Biterp {
 
         int intParam() {
             return static_cast<int>(longParam());
+        }
+
+        /**
+         * Optional trailing parameter: absent or empty value gives the default.
+         */
+        bool optBoolParam(bool defaultValue) {
+            if (optionalMissing()) {
+                return defaultValue;
+            }
+            return boolParam();
+        }
+
+        // Skip an optional parameter of any type
+        void skipOptional() {
+            if (index < paramsCount) {
+                index++;
+            }
+        }
+
+        std::string optStringParamUtf8(const std::string& defaultValue = std::string()) {
+            if (optionalMissing()) {
+                return defaultValue;
+            }
+            return stringParamUtf8();
+        }
+
+        int64_t optLongParam(int64_t defaultValue) {
+            if (optionalMissing()) {
+                return defaultValue;
+            }
+            return longParam();
         }
 
         bool boolParam() {
@@ -158,6 +205,18 @@ namespace Biterp {
         }
 
     protected:
+        bool optionalMissing() {
+            if (index >= paramsCount) {
+                return true;
+            }
+            tVariant *param = &params[index];
+            if (param->vt == VTYPE_EMPTY || param->vt == VTYPE_NULL) {
+                index++;
+                return true;
+            }
+            return false;
+        }
+
         tVariant *checkResultParam(tVariant *param) {
             if (!param) {
                 param = retValue;
@@ -175,7 +234,6 @@ namespace Biterp {
         int index;
         long paramsCount;
         MemoryManager &memManager;
-        std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> u16Converter;
     };
 }
 

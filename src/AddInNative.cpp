@@ -1,5 +1,6 @@
 
 #include "RabbitMQClientNative.h"
+#include <new>
 #include <addin/ComponentBase.h>
 
 #pragma warning( disable : 4267)
@@ -31,8 +32,9 @@ static AppCapabilities g_capabilities = eAppCapabilitiesInvalid;
 //---------------------------------------------------------------------------//
 EXPORT long GetClassObject(const WCHAR_T *wsName, IComponentBase **pInterface) {
     if (!*pInterface) {
-        *pInterface = new RabbitMQClientNative();
-        return (long) (*pInterface);
+        *pInterface = new (std::nothrow) RabbitMQClientNative();
+        // non zero means success; the pointer itself does not fit into long on Windows x64
+        return *pInterface ? 1 : 0;
     }
     return 0;
 }

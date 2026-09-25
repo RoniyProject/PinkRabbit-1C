@@ -195,7 +195,7 @@
     <ClInclude Include="..\..\src\RabbitMQClientNative.h" />
     <ClInclude Include="..\..\src\Utils.h" />
     <ClInclude Include="..\..\src\windows\ConnectionImpl.h" />
-    <ClInclude Include="..\..\src\windows\SimplePocoHandler.h" />
+    <ClInclude Include="..\..\src\ConnectionEvents.h" />
     <ClInclude Include="framework.h" />
   </ItemGroup>
   <ItemGroup>
@@ -205,7 +205,6 @@
     <ClCompile Include="..\..\src\RabbitMQClientNative.cpp" />
     <ClCompile Include="..\..\src\Utils.cpp" />
     <ClCompile Include="..\..\src\windows\ConnectionImpl.cpp" />
-    <ClCompile Include="..\..\src\windows\SimplePocoHandler.cpp" />
     <ClCompile Include="dllmain.cpp" />
   </ItemGroup>
   <ItemGroup>

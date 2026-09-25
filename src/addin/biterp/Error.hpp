@@ -14,8 +14,7 @@ namespace Biterp {
 
     class Error : public std::runtime_error {
     public:
-        Error(const std::string &msg) : std::runtime_error(msg) {
-            *this << msg;
+        Error(const std::string &msg) : std::runtime_error(msg), errorString(msg) {
 #if defined(__ANDROID__)
             pthread_key_t key;
             int res = pthread_key_create(&key, NULL);
@@ -34,15 +33,16 @@ namespace Biterp {
             return errorString.c_str();
         };
 
+        // The class keeps only a string, so the exception object is copyable
         template<typename T>
         Error &&operator<<(T value) {
+            std::ostringstream ss;
             ss << value;
-            errorString = ss.str();
+            errorString += ss.str();
             return std::move(*this);
         }
 
     private:
-        std::stringstream ss;
         std::string errorString;
     };
 

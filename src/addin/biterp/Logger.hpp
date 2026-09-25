@@ -7,12 +7,15 @@
 #include <fstream>
 #include <sstream>
 #include <mutex>
+#include <atomic>
 #include <chrono>
 #include <iomanip>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
+#include "../AddInDefBase.h"
 
 using json = nlohmann::json;
 using namespace std::chrono;
@@ -24,7 +27,7 @@ namespace fs = std::filesystem;
 #include <addin/IAndroidComponentHelper.h>
 #include "../jni/jnienv.h"
 
-#define LOCALTIME(V, T) tm V = *localtime(T)
+#define LOCALTIME(V, T) tm V; localtime_r(T, &V)
 
 #endif
 
@@ -33,8 +36,8 @@ namespace fs = std::filesystem;
 #include <unistd.h>
 #include <pwd.h>
 
-#define GETPID  getpid 
-#define LOCALTIME(V, T) tm V = *localtime(T)
+#define GETPID  getpid
+#define LOCALTIME(V, T) tm V; localtime_r(T, &V)
 
 #endif
 
@@ -43,7 +46,7 @@ namespace fs = std::filesystem;
 #include <Shlobj.h>
 #include <process.h>
 
-#define GETPID  _getpid 
+#define GETPID  _getpid
 #define LOCALTIME(V, T) tm V; localtime_s(&V, T)
 
 #endif
@@ -52,7 +55,10 @@ namespace fs = std::filesystem;
 namespace Biterp {
 
     /**
-     * Log to file and logcat. Rotate logs with debug filtering.
+     * Log to file and logcat. Rotate logs with level filtering.
+     * The logger never throws: a failure to format or to write a record is ignored.
+     * Default level is WARNING, it can be changed by setLevel() or by the environment
+     * variable PINKRABBITMQ_LOG_LEVEL (D, I, W, E, F).
      */
     class Logging {
 
@@ -69,6 +75,7 @@ namespace Biterp {
             std::string subname;
             std::string version;
             std::string instance;
+            inline bool enabled(int level) const { return Logging::isEnabled(level); }
             inline void debug(const std::string &text) const {Logging::debug(text, *this);}
             inline void info(const std::string &text) const {Logging::info(text, *this);}
             inline void warning(const std::string &text) const {Logging::warning(text, *this);}
@@ -91,7 +98,64 @@ namespace Biterp {
             return instance();
         }
 
+        /**
+         * Value of an environment variable of the process (current, not the CRT snapshot).
+         */
+        static std::string environment(const char* name) {
+#if defined(_WIN32) || defined(_WIN64)
+            std::vector<char> buffer(512);
+            DWORD length = GetEnvironmentVariableA(name, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (length >= buffer.size()) {
+                buffer.resize(static_cast<size_t>(length) + 1);
+                length = GetEnvironmentVariableA(name, buffer.data(), static_cast<DWORD>(buffer.size()));
+            }
+            if (length == 0 || length >= buffer.size()) {
+                return std::string();
+            }
+            return std::string(buffer.data(), length);
+#else
+            const char* value = std::getenv(name);
+            return value ? std::string(value) : std::string();
+#endif
+        }
+
+        inline static bool isEnabled(int level) {
+            return level >= instance().minlevel.load(std::memory_order_relaxed);
+        }
+
+        inline static void setLevel(int level) {
+            if (level < Logger::Level::LDEBUG) {
+                level = Logger::Level::LDEBUG;
+            }
+            if (level > Logger::Level::LFATAL) {
+                level = Logger::Level::LFATAL;
+            }
+            instance().minlevel.store(level, std::memory_order_relaxed);
+        }
+
+        /**
+         * Parse level name: D/I/W/E/F or debug/info/warning/error/fatal (case insensitive).
+         * @return level or -1 if the name is unknown
+         */
+        static int levelFromName(const std::string& name) {
+            if (name.empty()) {
+                return -1;
+            }
+            const char c = static_cast<char>(toupper(static_cast<unsigned char>(name[0])));
+            switch (c) {
+            case 'D': return Logger::Level::LDEBUG;
+            case 'I': return Logger::Level::LINFO;
+            case 'W': return Logger::Level::LWARNING;
+            case 'E': return Logger::Level::LERROR;
+            case 'F': return Logger::Level::LFATAL;
+            default: return -1;
+            }
+        }
+
         inline static void log(int level, const std::string &text, const Logger& logger) {
+            if (!isEnabled(level)) {
+                return;
+            }
             instance()._log(level, text, logger);
         }
 
@@ -118,21 +182,21 @@ namespace Biterp {
         }
 
         Logging& setLoglevel(const std::string& loglevel){
-            std::lock_guard<std::mutex> lock(_mutex);
-            for (int i=0;i<=Logger::Level::LFATAL; i++){
-                if (levels[i] == loglevel){
-                    minlevel = i;
-                }
+            int level = levelFromName(loglevel);
+            if (level >= 0) {
+                setLevel(level);
             }
             return *this;
         }
 
     private:
         static constexpr int CLEAN_INTERVAL = 600;
-        static constexpr int KEEP_TIME = 60 * 10;
+        static constexpr int KEEP_TIME = 3 * 24 * 60 * 60;
+        static constexpr int FLUSH_INTERVAL = 1;
         static constexpr char FILE_FMT[] = "%Y-%m-%d-%H-%M";
         static constexpr char ISO_FMT[] = "%FT%H:%M:%S";
         static constexpr char PREFIX[] = "comc1c";
+        static constexpr char LEVEL_ENV[] = "PINKRABBITMQ_LOG_LEVEL";
 
         /**
          * Set logs filename, open current logfile.
@@ -140,15 +204,27 @@ namespace Biterp {
          * @param addin
          */
         void _init(IAddInDefBase *addin, const std::string& name, const std::string& version) {
-            if (!_fname.empty()) {
-                // already inited
-                return;
+            try {
+                std::lock_guard<std::mutex> lock(_mutex);
+                if (!_fname.empty()) {
+                    // already inited
+                    return;
+                }
+                defaultLogger().subname = name;
+                defaultLogger().version = version;
+                const std::string envLevel = environment(LEVEL_ENV);
+                if (!envLevel.empty()) {
+                    int level = levelFromName(envLevel);
+                    if (level >= 0) {
+                        setLevel(level);
+                    }
+                }
+                uint32_t pid = (uint32_t)GETPID();
+                _path = getFilePath(addin);
+                _fname = _path + PREFIX + std::to_string(pid);
             }
-            defaultLogger().subname = name;
-            defaultLogger().version = version;
-            uint32_t pid = (uint32_t)GETPID();
-            _path = getFilePath(addin);
-            _fname = _path + PREFIX + std::to_string(pid);
+            catch (...) {
+            }
         }
 
         std::string formatTime(const char* fmt, const std::tm* tm, int ms=-1){
@@ -162,43 +238,49 @@ namespace Biterp {
 
 
         /**
-         * Save log to file. Multithread.
+         * Save log to file. Multithread, never throws.
          * @param level
          * @param text
          */
-        void _log(int level, const std::string &text, const Logger& logger) {
-            logNative(level, text);
-            if (level < minlevel || _fname.empty()){
-                return;
+        void _log(int level, const std::string &text, const Logger& logger) noexcept {
+            try {
+                logNative(level, text);
+                auto now = system_clock::now();
+                auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+                time_t timer = system_clock::to_time_t(now);
+                LOCALTIME(tm, &timer);
+                std::lock_guard<std::mutex> lock(_mutex);
+                if (_fname.empty()) {
+                    return;
+                }
+                std::ofstream& file = getFile(formatTime(FILE_FMT, &tm));
+                if (!file) {
+                    return;
+                }
+                std::string line = buildRecord(logger, text, level, formatTime(ISO_FMT, &tm, (int)ms.count()));
+                file << line << '\n';
+                if (level >= Logger::Level::LWARNING || duration_cast<seconds>(now - flushTime).count() >= FLUSH_INTERVAL) {
+                    file.flush();
+                    flushTime = now;
+                }
+                if ((int)duration_cast<seconds>(now - cleanTime).count() < CLEAN_INTERVAL){
+                    return;
+                }
+                cleanTime = now;
+                cleanOld(_path);
             }
-
-            auto now = system_clock::now();
-            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-            time_t timer = system_clock::to_time_t(now);
-            LOCALTIME(tm, &timer);
-            std::lock_guard<std::mutex> lock(_mutex);
-            std::ofstream& file = getFile(formatTime(FILE_FMT, &tm));
-            if (!file) {
-                return;
+            catch (...) {
             }
-            std::string line = buildRecord(logger, text, level, formatTime(ISO_FMT, &tm, (int)ms.count()));
-            file << line << std::endl;
-            file.flush();
-            if ((int)duration_cast<seconds>(now - cleanTime).count() < CLEAN_INTERVAL){
-                return;
-            }
-            cleanTime = now;
-            cleanOld(_path);
         }
 
-        std::string buildRecord(const Logger& logger, const std::string message, int level, const std::string time){
+        std::string buildRecord(const Logger& logger, const std::string& message, int level, const std::string& time){
             record["Subsystemname"] = logger.subname;
             record["Version"] = logger.version;
             record["Instance"] = logger.instance;
             record["Description"] = message;
             record["Loglevel"] = levels[level];
             record["Date"] = time;
-            return record.dump();
+            return record.dump(-1, ' ', false, json::error_handler_t::replace);
         }
 
         void cleanOld(std::string path){
@@ -209,8 +291,8 @@ namespace Biterp {
                 if (path.empty() || !fs::exists(path, err)){
                     return;
                 }
-                for (const auto & entry : fs::directory_iterator(path)){
-                    if (!entry.is_regular_file() || entry.path().extension() != ".txt"){
+                for (const auto & entry : fs::directory_iterator(path, err)){
+                    if (!entry.is_regular_file(err) || entry.path().extension() != ".txt"){
                         continue;
                     }
                     std::string nm = entry.path().stem().string();
@@ -258,7 +340,7 @@ namespace Biterp {
             jobject jfile = env->CallObjectMethod(activity, meth, nullptr);
             env->DeleteLocalRef(cls);
             if (!jfile) {
-                logNative(LERROR, "ExternalFilesDir failed for logger");
+                logNative(Logger::Level::LERROR, "ExternalFilesDir failed for logger");
                 return "";
             }
             cls = env->GetObjectClass(jfile);
@@ -267,7 +349,8 @@ namespace Biterp {
             env->DeleteLocalRef(jfile);
             env->DeleteLocalRef(cls);
             if (!jpath) {
-                logNative(LERROR, "AbsolutePath failed for logger");
+                logNative(Logger::Level::LERROR, "AbsolutePath failed for logger");
+                return "";
             }
             const char *chars = env->GetStringUTFChars(jpath, nullptr);
             path = chars;
@@ -275,15 +358,24 @@ namespace Biterp {
             env->DeleteLocalRef(jpath);
 #elif (defined(_WIN32) || defined(_WIN64))
             // create logfile in LOCAL_APPDATA/biterp/logs/<name>.log
-            char buf[MAX_PATH];
-            SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, buf);
+            char buf[MAX_PATH] = {0};
+            if (SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, buf) != S_OK) {
+                buf[0] = 0;
+            }
             path = buf;
             if (path.empty()){
                 return "./";
             }
             path += "/biterp";
 #elif defined(__linux__)
-            path = getpwuid(getuid())->pw_dir;
+            struct passwd* pw = getpwuid(getuid());
+            if (pw && pw->pw_dir) {
+                path = pw->pw_dir;
+            }
+            else {
+                const char* home = std::getenv("HOME");
+                path = home ? home : "";
+            }
             if (path.empty()){
                 return "./";
             }
@@ -295,7 +387,8 @@ namespace Biterp {
                 return "./";
             }
             path += "/logs";
-            fs::create_directories(path);
+            std::error_code err;
+            fs::create_directories(path, err);
             return path + "/";
         }
 
@@ -306,20 +399,23 @@ namespace Biterp {
          */
         void logNative(int level, const std::string &text) {
 #if defined(__ANDROID__)
-            level += ANDROID_LOG_DEBUG - Level::LDEBUG;
-            __android_log_write(level, name.c_str(), text.c_str());
+            level += ANDROID_LOG_DEBUG - Logger::Level::LDEBUG;
+            __android_log_write(level, defaultLogger().subname.c_str(), text.c_str());
+#else
+            (void) level;
+            (void) text;
 #endif
         }
 
         std::ofstream& getFile(const std::string& date){
-            time_t tm = time(nullptr);
             std::string fname = _fname + "-" + date + ".txt";
-            if (fname == _current_file && _file){
+            if (fname == _current_file && _file.is_open()){
                 return _file;
             }
-            if (_file){
+            if (_file.is_open()){
                 _file.close();
             }
+            _file.clear();
             _file.open(fname, std::ios::out | std::ios::app | std::ios::ate);
             _current_file = fname;
             return _file;
@@ -332,8 +428,9 @@ namespace Biterp {
         std::ofstream _file;
         std::mutex _mutex;
         system_clock::time_point cleanTime;
+        system_clock::time_point flushTime;
         json record;
-        int minlevel;
+        std::atomic<int> minlevel;
         std::vector<std::string> levels;
 
     private:
@@ -348,7 +445,7 @@ namespace Biterp {
             return _defaultLogger;
         }
 
-        Logging(): minlevel(0) , levels{"D","I","W","E","F"}{
+        Logging(): minlevel(Logger::Level::LWARNING) , levels{"D","I","W","E","F"}{
             record = json({
                 {"Appname", ""},
                 {"Subsystemname", ""},
@@ -363,8 +460,12 @@ namespace Biterp {
         }
 
         ~Logging() {
-            if (_file) {
-                _file.close();
+            try {
+                if (_file.is_open()) {
+                    _file.close();
+                }
+            }
+            catch (...) {
             }
         }
 

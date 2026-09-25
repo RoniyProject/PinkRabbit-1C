@@ -6,11 +6,11 @@
 #define COMPONENT_HPP
 
 #include <string>
+#include <typeinfo>
 #include "../AddInDefBase.h"
 #include "MemoryManager.hpp"
 #include "CallContext.hpp"
-#include <codecvt>
-#include <locale>
+#include "Utf.hpp"
 #include "Logger.hpp"
 
 #define NATIVE_ERROR    1006
@@ -23,6 +23,9 @@
 #define LOGW(M) getLogger().warning(M)
 #define LOGE(M) getLogger().error(M)
 
+// Check before building an expensive log message
+#define LOG_ENABLED(L) (Biterp::Logging::isEnabled(Biterp::Logging::Logger::L))
+
 
 namespace Biterp {
 
@@ -32,7 +35,7 @@ namespace Biterp {
     class Component {
     public:
         Component(const char *className) : addin(nullptr), skipAddError(false) {
-            this->className = u16Converter.from_bytes(className);
+            this->className = Utf::toUtf16(className);
             this->version = QUOTE(VERSION);
         }
 
@@ -44,7 +47,7 @@ namespace Biterp {
         * @return
         */
         virtual bool init(IAddInDefBase *addin) {
-            logger = Biterp::Logging::getLogger(u16Converter.to_bytes(className), version, addin, this);
+            logger = Biterp::Logging::getLogger(Utf::toUtf8(className), version, addin, this);
             LOGD("init");
             this->addin = addin;
             return true;
@@ -84,7 +87,7 @@ namespace Biterp {
         * @return
         */
         inline bool getVersion(tVariant *pvarRetValue) {
-            std::u16string uver = u16Converter.from_bytes(version);
+            std::u16string uver = Utf::toUtf16(version);
             return memManager.variantFromString(pvarRetValue, uver);
         }
 
@@ -125,16 +128,7 @@ namespace Biterp {
         void addError(const std::string &descr, const std::string &source = "",
                       unsigned short wcode = NATIVE_ERROR,
                       long scode = E_FAIL) {
-            std::u16string wdescr;
-            std::u16string wsource;
-            try {
-                wdescr = u16Converter.from_bytes(descr);
-                wsource = u16Converter.from_bytes(source);
-            }
-            catch (const std::exception &) {
-                wdescr = u"Invalid error message";
-            }
-            addError(move(wdescr), move(wsource), wcode, scode);
+            addError(Utf::toUtf16(descr), Utf::toUtf16(source), wcode, scode);
         }
 
         /**
@@ -143,11 +137,27 @@ namespace Biterp {
          */
         void setSkipAddError(bool skip = true) { skipAddError = skip; }
 
+        /**
+         * Report exception to log and to 1C. Never throws.
+         */
+        void reportException(const std::string& who, const std::string& what) noexcept {
+            try {
+                LOGE(who + ": " + what);
+            }
+            catch (...) {
+            }
+            try {
+                addError(what, who);
+            }
+            catch (...) {
+            }
+        }
+
 
     protected:
         /**
          * Template function to call implementation.
-         * Rethrows java errors.
+         * Never lets an exception out to the platform.
          * @tparam T - proxy object type
          * @tparam Proc - proxy object method type
          * @param obj - proxy object pointer
@@ -169,17 +179,16 @@ namespace Biterp {
                 result = true;
             }
             catch (std::exception &e) {
-                std::string who = typeid(e).name();
-                std::string what = e.what();
-                LOGE(who + ": " + what);
-                addError(what, who);
+                reportException(typeid(e).name(), e.what());
+            }
+            catch (...) {
+                reportException("unknown", "Unknown native exception");
             }
             return result;
         }
 
 
     protected:
-        std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> u16Converter;
         std::u16string className;
         std::string version;
         IAddInDefBase *addin;
